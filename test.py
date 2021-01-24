@@ -31,12 +31,17 @@ class TestDataset(data.Dataset):
     def __getitem__(self, index):
         
         file = self.files[index]
-            
-        w = torch.load(self.data_dir + file)
         
-        return w, file[:-3]
+        sr = 32000
+#         w = torch.load(self.data_dir + file)
+        
+        w, sr = librosa.load(self.data_dir + file, sr)
+        w = torch.from_numpy(w)
+        
+        
+        return w, file[:-5]
     
-test_dataset = TestDataset('test_torch/')
+test_dataset = TestDataset('train_32000/test/')
 
 batch_size = 16
 num_workers = 16
@@ -55,11 +60,11 @@ sub_df = sub_df.set_index('recording_id')
 
 device = 'cuda:3'
 
-model = Model.load_from_checkpoint(checkpoint_path="lightning_logs/version_20/checkpoints/val_loss=0.0801.ckpt")
+model = Model.load_from_checkpoint(checkpoint_path="lightning_logs/version_4/checkpoints/val_acc=0.8189-v0.ckpt")
 model.eval()
 model.to(device)
 
-for W,F in tqdm(test_loader):
+for X,F in tqdm(test_loader):
     
     with torch.no_grad():
         
@@ -70,8 +75,20 @@ for W,F in tqdm(test_loader):
 #             Y_hat.append(y_hat)
             
 #         (y_hat,_) = torch.max(torch.stack(Y_hat, dim=1), dim=1)
+        sr = 32000
+    
+        X = X.unfold(1, sr * 10, sr * 5)
         
-        y_hat = model(W.to(device))
+#         print(X.shape)
+        Y_hat = []
+        for i in range(X.size(1)):
+            y_hat = model(X[:,i,:].to(device))
+            Y_hat.append(y_hat)
+            
+        (y_hat,_) = torch.max(torch.stack(Y_hat, dim=1), dim=1)
+    
+    
+#         y_hat = model(W.to(device))
         
         for index, image_id in enumerate(F): 
             
