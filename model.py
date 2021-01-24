@@ -13,7 +13,7 @@ import pytorch_lightning as pl
 
 from torch.optim.lr_scheduler import StepLR, ReduceLROnPlateau
 # from panns_inference.models import Cnn14
-from audioset_tagging_cnn.pytorch.models import Wavegram_Logmel_Cnn14
+# from audioset_tagging_cnn.pytorch.models import Wavegram_Logmel_Cnn14
 
 import numpy as np
 
@@ -275,9 +275,11 @@ class Encoder(nn.Module):
 
         self.bn0 = nn.BatchNorm2d(mel_bins)
         
-        fe_features = 1280
+        fe = 1280
+        fe_features = 2048
+#         fe_features = 1280
         
-        self.fc1 = nn.Linear(fe_features, fe_features, bias=True)
+        self.fc1 = nn.Linear(fe, fe_features, bias=True)
         
         self.att_block = AttBlock(fe_features)
         
@@ -304,7 +306,7 @@ class Encoder(nn.Module):
             x = self.spec_augmenter(x)
 
         # Mixup on spectrogram
-        alpha = 0.5
+        alpha = 1.0
         if self.training:
             x, y_a, y_b, lam = do_mixup(x,y, alpha)
 
@@ -313,9 +315,11 @@ class Encoder(nn.Module):
 #         print(x.shape)
         x = torch.mean(x, dim=3)
 
-
-        x1 = F.max_pool1d(x, kernel_size=3, stride=3, padding=1)
-        x2 = F.avg_pool1d(x, kernel_size=3, stride=3, padding=1)
+        
+        stride = 1
+        
+        x1 = F.max_pool1d(x, kernel_size=3, stride=stride, padding=1)
+        x2 = F.avg_pool1d(x, kernel_size=3, stride=stride, padding=1)
         x = x1 + x2
         
         x = F.dropout(x, p=0.5, training=self.training)
@@ -332,6 +336,8 @@ class Encoder(nn.Module):
 
         x = torch.sigmoid(x)
         
+#         x = torch.clamp(x,0,1)
+        
         if self.training:
             return x, y_a, y_b, lam
         
@@ -347,25 +353,31 @@ class Model(pl.LightningModule):
         self.learning_rate = 0.001
         self.train_loader_len = train_loader_len
         
-        sr = 22050
+        self.sr = 32000
         
-        self.encoder = Encoder(sample_rate=sr, 
-            window_size=1024,
-            hop_size=320,
-            mel_bins=128,
+        self.encoder = Encoder(sample_rate=self.sr, 
+            window_size=2048,
+            hop_size=512,
+            mel_bins=328,
             fmin=50,
-            fmax=sr // 2,
+            fmax=self.sr // 2,
             classes_num=24)
-            
+             
     def forward(self, x, y=None):
         x = self.encoder(x, y)
         return x
     
     def training_step(self, batch, batch_nb):
         X, y = batch
+        
+#         print(X.shape)
+#         y_hat = self.forward(X)
+        
         y_hat, y_a, y_b, lam = self.forward(X, y)
         
         loss = lam * F.binary_cross_entropy(y_hat, y_a) + (1 - lam) * F.binary_cross_entropy(y_hat, y_b)
+
+#         loss = F.binary_cross_entropy(y_hat, y)
     
         self.log('train_loss', loss)
         return loss
@@ -374,16 +386,18 @@ class Model(pl.LightningModule):
     def validation_step(self, batch, batch_nb):
         X, y = batch
 
-        y_hat = self.forward(X)
+#         y_hat = self.forward(X)
+       
 
-#         l = torch.chunk(X, 6, dim=1)
-#         print(l[0].shape)
-#         Y_hat = []
-#         for x in l:
-#             y_hat = self.forward(x)
-#             Y_hat.append(y_hat)
+        X = X.unfold(1, self.sr * 10, self.sr * 5)
+        
+#         print(X.shape)
+        Y_hat = []
+        for i in range(X.size(1)):
+            y_hat = self.forward(X[:,i,:])
+            Y_hat.append(y_hat)
             
-#         (y_hat,_) = torch.max(torch.stack(Y_hat, dim=1), dim=1)
+        (y_hat,_) = torch.max(torch.stack(Y_hat, dim=1), dim=1)
         
         loss = F.binary_cross_entropy(y_hat, y)
 #         print(y_hat, y)
@@ -401,17 +415,29 @@ class Model(pl.LightningModule):
         self.log('val_loss', avg_loss,prog_bar=True)
         self.log('val_acc', lwlrap, prog_bar=True)
     
+    
+    def optimizer_step(self, current_epoch, batch_nb, optimizer, optimizer_i, second_order_closure=None, on_tpu=False, using_native_amp=True, using_lbfgs=False):
+        
+        optimizer.step(closure=second_order_closure)
+#         optimizer.zero_grad()
+        
+        self.scheduler.step(current_epoch + batch_nb / self.train_loader_len // 4)
+
+        
+    
     def configure_optimizers(self):
         
-        optimizer = torch.optim.Adam(self.parameters(), lr=self.learning_rate)
+        optimizer = torch.optim.Adam(self.parameters(), lr=self.learning_rate, weight_decay=1e-4)
         
-#         scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer, max_lr=self.learning_rate, epochs=self.epochs, steps_per_epoch=self.train_loader_len // 2, pct_start=0.25)
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=int(self.train_loader_len*0.25), T_mult=1, eta_min=0.001,                     last_epoch=-1)
-
-        scheduler = {"scheduler": scheduler, "interval" : "step" } 
-        return [optimizer], [scheduler]
-                                                
-                          
+        self.scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=self.train_loader_len // 4, T_mult=1, eta_min=1e-6, last_epoch=-1)
+        
+#         scheduler = {
+#             'scheduler': scheduler,
+#             'interval': 'step'
+#         }
+        
+        return optimizer
+                                                                 
     def LWLRAP(self, preds, labels):
         # Ranks of the predictions
         ranked_classes = torch.argsort(preds, dim=-1, descending=True)
