@@ -103,7 +103,7 @@ for fold_id in range(5):
     predict(fold_id, id_dict)
     
 for k, v in id_dict.items():
-    l = np.array(v).mean(0)
+    l = np.array(v).max(0)
     l = list(map(lambda x: round(x,4), l))
     l = l.tolist()
     
