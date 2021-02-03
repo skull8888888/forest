@@ -7,7 +7,6 @@ import random
 import torch
 import torchvision
 from torch.utils import data
-import cv2
 from PIL import Image
 
 import torchvision.transforms as transforms
@@ -30,6 +29,10 @@ from pytorch_lightning.callbacks import ModelCheckpoint
 
 import librosa
 
+from audiomentations import AddGaussianSNR, AddBackgroundNoise
+
+from config import CONFIG
+
 class Dataset(data.Dataset):
 
     def __init__(self, data_dir, df, train=True):
@@ -37,12 +40,18 @@ class Dataset(data.Dataset):
         self.data_dir = data_dir
         self.df = df.groupby('recording_id').agg(lambda x: list(x)).reset_index()
         self.train = train
-
+        
+        self.augment = AddBackgroundNoise( sounds_path='train_32000/fp/', min_snr_in_db=0.1, max_snr_in_db=1, p=0.5)
+        
+        self.files = os.listdir('train_32000/fp/')
+        
     def __len__(self):
         return len(self.df)
     
-    def crop(self, y, sr, period, record):
-
+    def crop(self, y, sr, period, record, noise):
+        
+        no_bird = y
+        
         len_y = len(y)
         effective_length = sr * period
 
@@ -80,48 +89,43 @@ class Dataset(data.Dataset):
                 label[record['species_id'][i]] = 1
         
         return y, label
+        
+#         ######################
+#         noise_start = np.random.randint(0, 50*sr)
+#         noise = noise[noise_start:noise_start + effective_length]
+#         ######################
+        
+# #         print(len(no_bird))
+        
+#         bird = np.random.choice([0,1], 1, p=[0.75, 0.25])
 
-#         rand_choice = np.random.choice([0,1], 1, p=[0.7, 0.3])
-
-#         if rand_choice == 0:
+#         if bird == 0:
 #             return y, label
 
-#         return no_sounds, torch.zeros(24)
-
-#     def crop(self, x, sr, period, record):
+#         return noise, torch.zeros(24)
         
-#         l = torch.chunk(x, period)
-#         chunk_id = np.random.randint(0,6)
-
-#         x_cut = l[chunk_id]
-
-#         beginning_time = chunk_id*10
-#         ending_time = (chunk_id + 1)*10
-
-#         label = torch.zeros(24)
-
-#         for i in range(len(record['t_min'])):
-#             if (record['t_min'][i] <= ending_time) and (record['t_max'][i] >= beginning_time):
-#                 label[record['species_id'][i]] = 1
-
-#         return x_cut, label
+        
     
     def __getitem__(self, index):
         
         r = self.df.iloc[index]
         recording_id = r['recording_id']
         
+        noise = self.files[index]
+        w_noise, sr = librosa.load('train_32000/fp/' + noise, CONFIG.sr)
+        w_noise = torch.from_numpy(w_noise)
 ###############  audio
         
-        sr = 32000
-#         x = torch.load(self.data_dir + recording_id + '.pt')
-        w, sr = librosa.load(self.data_dir + recording_id + '.flac', sr)
+        w, sr = librosa.load(self.data_dir + recording_id + '.flac', CONFIG.sr)
+        
+#         if self.train:
+#             w = self.augment(w, CONFIG.sr)    
+        
         x = torch.from_numpy(w)
         
-        period = 10
 
         if self.train:
-            x_cut, label = self.crop(x, sr, period, r)
+            x_cut, label = self.crop(x, sr, CONFIG.period, r, w_noise)
 
             return x_cut, label
         
@@ -136,65 +140,61 @@ df = pd.read_csv('train_tp_folds.csv')
 
 # folds = pd.read_csv('train_folds.csv')
 
-train_df = df[df['kfold'] != 0]
-val_df = df[df['kfold'] == 0]
-
 # train_df, val_df = train_test_split(df, test_size=0.2)
     
-batch_size = 16
-num_workers = 16
+batch_size = CONFIG.batch_size
+num_workers = 32
 # accumulate = 0
-epochs = 50
+epochs = CONFIG.epochs
 
-train_dataset = Dataset('train_32000/train/', train_df)
-
-train_loader = DataLoader(
-    train_dataset, 
-    batch_size=batch_size, 
-    shuffle=True, 
-    drop_last=True, 
-    num_workers=num_workers, 
-    pin_memory=True)
-
-val_dataset = Dataset('train_32000/train/', val_df, False)
-
-val_loader = DataLoader(
-    val_dataset, 
-    batch_size=batch_size, 
-    shuffle=False, 
-    drop_last=True, 
-    num_workers=num_workers, 
-    pin_memory=True)
-
-
-# checkpoint_dir = 'video/lightning_logs/version_0/checkpoints/epoch=6.ckpt'
-model = Model(epochs, len(train_loader))
-
-seed_everything(42)
-
-val_acc_callback = ModelCheckpoint(
-        monitor='val_acc', 
-        filename='{val_acc:.4f}', 
-        save_last=True, 
-        mode='max')
+for valid_fold_id in range(5):
     
-val_loss_callback = ModelCheckpoint(
-    monitor='val_loss', 
-    filename='{val_loss:.4f}', 
-    mode='min')
+    checkpoint_dir = 'checkpoints/fold_' + str(valid_fold_id)
+    
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    
+    val_acc_callback = ModelCheckpoint(
+            monitor='val_acc', 
+            dirpath=checkpoint_dir,
+            filename='{epoch:02d}-{val_acc:.4f}',
+            save_last=True, 
+            mode='max')
 
-trainer = Trainer(
-#         logger=None,
-#     auto_lr_find=True, 
-    gpus=[0], 
-    accelerator='ddp',
-#     accumulate_grad_batches=accumulate, 
-    callbacks=[val_acc_callback, val_loss_callback], 
-    max_epochs=epochs,
-#     precision=16
-)
+    train_df = df[df['kfold'] != valid_fold_id]
+    val_df = df[df['kfold'] == valid_fold_id]
 
-# trainer.tune(model, train_loader)
-trainer.fit(model, train_loader, val_loader)
+    train_dataset = Dataset('train_32000/train/', train_df)
+
+    train_loader = DataLoader(
+        train_dataset, 
+        batch_size=batch_size, 
+        shuffle=True, 
+        drop_last=True, 
+        num_workers=num_workers, 
+        pin_memory=True)
+
+    val_dataset = Dataset('train_32000/train/', val_df, False)
+
+    val_loader = DataLoader(
+        val_dataset, 
+        batch_size=batch_size, 
+        shuffle=False, 
+        drop_last=True, 
+        num_workers=num_workers, 
+        pin_memory=True)
+
+
+    # checkpoint_path = 'lightning_logs/version_16/checkpoints/val_loss=0.0303.ckpt'
+    model = Model(epochs, len(train_loader))
+    # model = Model.load_from_checkpoint(checkpoint_path=checkpoint_path)
+
+    trainer = Trainer(
+        gpus=[0], 
+        accelerator='ddp',
+        callbacks=[val_acc_callback], 
+        max_epochs=epochs)
+
+    # trainer.tune(model, train_loader)
+    trainer.fit(model, train_loader, val_loader)
 
 
