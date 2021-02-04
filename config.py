@@ -13,7 +13,7 @@ class CONFIG:
     skip = 5
     
     epochs = 50
-    batch_size = 24 # 24 for b4, 32 for b0
+    batch_size = 32 # 24 for b4, 32 for b0
     
     valid_id = 0
     

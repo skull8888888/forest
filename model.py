@@ -26,53 +26,8 @@ import timm
 import math
 
 from config import CONFIG
-
+from transformer import MultiHead
 from lwlrap import lwlrap
-
-class ConvBlock(nn.Module):
-    def __init__(self, in_channels, out_channels):
-        
-        super(ConvBlock, self).__init__()
-        
-        self.conv1 = nn.Conv2d(in_channels=in_channels, 
-                              out_channels=out_channels,
-                              kernel_size=(3, 3), stride=(1, 1),
-                              padding=(1, 1), bias=False)
-                              
-        self.conv2 = nn.Conv2d(in_channels=out_channels, 
-                              out_channels=out_channels,
-                              kernel_size=(3, 3), stride=(1, 1),
-                              padding=(1, 1), bias=False)
-                              
-        self.bn1 = nn.BatchNorm2d(out_channels)
-        self.bn2 = nn.BatchNorm2d(out_channels)
-
-        self.init_weight()
-        
-    def init_weight(self):
-        init_layer(self.conv1)
-        init_layer(self.conv2)
-        init_bn(self.bn1)
-        init_bn(self.bn2)
-
-        
-    def forward(self, input, pool_size=(2, 2), pool_type='avg'):
-        
-        x = input
-        x = F.relu_(self.bn1(self.conv1(x)))
-        x = F.relu_(self.bn2(self.conv2(x)))
-        if pool_type == 'max':
-            x = F.max_pool2d(x, kernel_size=pool_size)
-        elif pool_type == 'avg':
-            x = F.avg_pool2d(x, kernel_size=pool_size)
-        elif pool_type == 'avg+max':
-            x1 = F.avg_pool2d(x, kernel_size=pool_size)
-            x2 = F.max_pool2d(x, kernel_size=pool_size)
-            x = x1 + x2
-        else:
-            raise Exception('Incorrect argument!')
-        
-        return x
 
 def do_mixup(x, y, alpha=1.0):
     '''Returns mixed inputs, pairs of targets, and lambda'''
@@ -117,8 +72,7 @@ class AttBlock(nn.Module):
 #     def __init__(self, in_features, classes_num):
 #         super(AttBlock, self).__init__()
 
-#         self.segment_attention = nn.Linear(in_features, 1)
-#         self.decision_attention = nn.Linear(in_features, classes_num)
+#         self.alpha = nn.Linear(in_features, 1)
         
 #     def forward(self, x):
         
@@ -126,7 +80,7 @@ class AttBlock(nn.Module):
 #         x: (batch, time, features)
 #         '''
         
-#         dot_product = torch.sigmoid(self.segment_attention(x))
+#         dot_product = torch.sigmoid(self.alpha(x))
         
 #         att_weights = dot_product / torch.sum(dot_product, dim=1).unsqueeze(2)
         
@@ -180,11 +134,11 @@ class AttBlock(nn.Module):
 #         return out
 
 
-class Encoder(nn.Module):
+class Encoder_Default(nn.Module):
     def __init__(self, sample_rate, window_size, hop_size, mel_bins, fmin, 
         fmax, classes_num):
         
-        super(Encoder, self).__init__()
+        super(Encoder_Default, self).__init__()
 
         window = 'hann'
         center = True
@@ -210,7 +164,7 @@ class Encoder(nn.Module):
         self.bn0 = nn.BatchNorm2d(mel_bins)
         
         
-        fe = 1792
+        fe = 1280
         fe_features = 2048
         
         self.fc1 = nn.Linear(fe, fe_features, bias=True)
@@ -218,7 +172,7 @@ class Encoder(nn.Module):
         self.att_block = AttBlock(fe_features, classes_num)
     
 #         self.fe = timm.models.resnest50d_4s2x40d(pretrained=True)
-        self.fe = timm.models.tf_efficientnet_b4_ns(pretrained=True)
+        self.fe = timm.models.tf_efficientnet_b0_ns(pretrained=True)
         self.fe = nn.Sequential(*list(self.fe.children())[:-2])  
         
 #         self.fc = nn.Linear(fe_features, classes_num)
@@ -264,9 +218,113 @@ class Encoder(nn.Module):
         x = F.dropout(x, p=CONFIG.p, training=self.training)
         
 #         x = self.att_block(x)
+#         x = self.fc(x)
         
 #         if self.training:
 #             return x, y
+        
+#         return x
+        
+        clipwise, weights, framewise = self.att_block(x)
+        
+        if self.training:
+            
+            return clipwise, y
+        
+        return torch.max(framewise, dim=-1)[0]
+
+
+class Encoder_Transformer(nn.Module):
+    def __init__(self, sample_rate, window_size, hop_size, mel_bins, fmin, 
+        fmax, classes_num):
+        
+        super(Encoder_Transformer, self).__init__()
+
+        window = 'hann'
+        center = True
+        pad_mode = 'reflect'
+        ref = 1.0
+        amin = 1e-10
+        top_db = None
+
+        # Spectrogram extractor
+        self.spectrogram_extractor = Spectrogram(n_fft=window_size, hop_length=hop_size, 
+            win_length=window_size, window=window, center=center, pad_mode=pad_mode, 
+            freeze_parameters=True)
+
+        # Logmel feature extractor
+        self.logmel_extractor = LogmelFilterBank(sr=sample_rate, n_fft=window_size, 
+            n_mels=mel_bins, fmin=fmin, fmax=fmax, ref=ref, amin=amin, top_db=top_db, 
+            freeze_parameters=True)
+
+        # Spec augmenter
+        self.spec_augmenter = SpecAugmentation(time_drop_width=64, time_stripes_num=2, 
+            freq_drop_width=4, freq_stripes_num=2)
+
+        self.bn0 = nn.BatchNorm2d(mel_bins)
+        
+        
+        fe = 1280
+        fe_features = 1280
+        
+        self.fc1 = nn.Linear(fe, fe_features, bias=True)
+        
+        n_head = 4
+        d_k = 64
+        d_v = 64
+        transformer_dropout = 0.2
+        
+        self.multihead = MultiHead(n_head, fe, d_k, d_v, transformer_dropout)
+        
+        self.att_block = AttBlock(fe_features, classes_num)
+        
+#         self.fe = timm.models.resnest50d_4s2x40d(pretrained=True)
+        self.fe = timm.models.tf_efficientnet_b0_ns(pretrained=True)
+        self.fe = nn.Sequential(*list(self.fe.children())[:-2])  
+        
+        self.fc = nn.Linear(fe_features, classes_num)
+        
+    def forward(self, x, y=None):
+        """
+        Input: (batch_size, data_length)"""
+        
+
+        x = self.spectrogram_extractor(x)   # (batch_size, 1, time_steps, freq_bins)
+        x = self.logmel_extractor(x)    # (batch_size, 1, time_steps, mel_bins)
+
+        frames_num = x.shape[2]
+        
+        x = x.transpose(1, 3)
+        x = self.bn0(x)
+        x = x.transpose(1, 3)
+        
+        if self.training:
+            x = self.spec_augmenter(x)
+
+        # Mixup on spectrogram
+        alpha=1.0
+        if self.training:
+            x, y = do_mixup(x,y, alpha)
+
+        x = torch.cat([x,x,x], dim=1)
+                    
+        x = self.fe(x)
+
+        x = torch.mean(x, dim=3) # averaging across frequency dimension 
+        
+        stride = 1
+        
+        x1 = F.max_pool1d(x, kernel_size=3, stride=stride, padding=1)
+        x2 = F.avg_pool1d(x, kernel_size=3, stride=stride, padding=1)
+        x = x1 + x2
+        
+        
+        x = F.dropout(x, p=CONFIG.p, training=self.training)
+        x = x.transpose(1, 2)     # (batch_size, time, features)   
+        x = self.multihead(x,x,x)
+        x = x.transpose(1, 2)
+        x = F.dropout(x, p=CONFIG.p, training=self.training)
+
         
         clipwise, weights, framewise = self.att_block(x)
         
@@ -286,7 +344,7 @@ class Model(pl.LightningModule):
         self.learning_rate = 0.001
         self.train_loader_len = train_loader_len
         
-        self.encoder = Encoder(sample_rate=CONFIG.sr, 
+        self.encoder = Encoder_Transformer(sample_rate=CONFIG.sr, 
             window_size=CONFIG.window_size,
             hop_size=CONFIG.hop_size,
             mel_bins=CONFIG.mel_bins,

@@ -1,3 +1,8 @@
+import torch
+import torch.nn as nn
+from torch.nn import functional as F
+import numpy as np
+
 class ScaledDotProductAttention(nn.Module):
     """Scaled Dot-Product Attention"""
 
@@ -65,7 +70,8 @@ class MultiHead(nn.Module):
         q = self.w_qs(q).view(sz_b, len_q, n_head, d_k) # (batch_size, T, 8, 64)
         k = self.w_ks(k).view(sz_b, len_k, n_head, d_k)
         v = self.w_vs(v).view(sz_b, len_v, n_head, d_v)
-
+        
+        # transpose so that each head is treated as a batch
         q = q.permute(2, 0, 1, 3).contiguous().view(-1, len_q, d_k) # (n*b) x lq x dk, (batch_size*8, T, 64)
         k = k.permute(2, 0, 1, 3).contiguous().view(-1, len_k, d_k) # (n*b) x lk x dk
         v = v.permute(2, 0, 1, 3).contiguous().view(-1, len_v, d_v) # (n*b) x lv x dv
@@ -74,6 +80,13 @@ class MultiHead(nn.Module):
         output, attn = self.attention(q, k, v, mask=mask)   # (n_head * batch_size, T, 64), (n_head * batch_size, T, T)
         
         output = output.view(n_head, sz_b, len_q, d_v)  # (n_head, batch_size, T, 64)
+
+        # reshaping equaivalent to concat in feature dimension (-1)
         output = output.permute(1, 2, 0, 3).contiguous().view(sz_b, len_q, -1) # b x lq x (n*dv), (batch_size, T, 512)
+        
+        # final fc to project back to the original dimension space
         output = F.relu_(self.dropout(self.fc(output)))
         return output
+    
+    
+    

@@ -58,62 +58,13 @@ sub_df = sub_df.set_index('recording_id')
 
 device = 'cuda:0'
 
-dfs = []
+# dfs = []
 
-from multiprocessing import Process
+# from multiprocessing import Process
 
-id_dict = {}
+# id_dict = {}
 
-def predict(fold_id, id_dict):
-    
-    ckpt = glob.glob(f'checkpoints/fold_{fold_id}/epoch*.ckpt')[0]
-    
-    model = Model.load_from_checkpoint(checkpoint_path=ckpt)
-    model = model.eval()
-    model.to(device)
-    
-    for X,F in tqdm(test_loader):
-
-        with torch.no_grad():
-
-            X = X.unfold(1, CONFIG.sr * CONFIG.period, CONFIG.sr * CONFIG.skip)
-
-            Y_hat = []
-
-            for i in range(X.size(1)):
-
-                y = model(X[:,i,:].to(device))
-                Y_hat.append(y)
-
-            (y_hat,_) = torch.max(torch.stack(Y_hat, dim=1), dim=1)
-
-            for index, image_id in enumerate(F): 
-
-                l = y_hat[index,:].tolist()
-                
-                if not image_id in id_dict:
-                    id_dict[image_id] = []
-                    
-                id_dict[image_id].append(l)
-
-processes = []
-                
-for fold_id in range(5):
-    print('predicting for fold ', fold_id)
-    predict(fold_id, id_dict)
-    
-for k, v in id_dict.items():
-    l = np.array(v).max(0)
-    l = list(map(lambda x: round(x,4), l))
-    l = l.tolist()
-    
-    sub_df.loc[k]= l
-
-sub_df.to_csv('submission.csv')
-    
-# models = nn.ModuleList()
-
-# for fold_id in range(5):
+# def predict(fold_id, id_dict):
     
 #     ckpt = glob.glob(f'checkpoints/fold_{fold_id}/epoch*.ckpt')[0]
     
@@ -121,38 +72,85 @@ sub_df.to_csv('submission.csv')
 #     model = model.eval()
 #     model.to(device)
     
-#     models.append(model)
-    
+#     for X,F in tqdm(test_loader):
 
-# for X,F in tqdm(test_loader):
-    
-#     with torch.no_grad():
-        
-#         X = X.unfold(1, CONFIG.sr * CONFIG.period, CONFIG.sr * CONFIG.skip)
-        
-#         Y_hat = []
-        
-#         for i in range(X.size(1)):
-            
-#             y_step = []
+#         with torch.no_grad():
 
-#             for model in models:
+#             X = X.unfold(1, CONFIG.sr * CONFIG.period, CONFIG.sr * CONFIG.skip)
+
+#             Y_hat = []
+
+#             for i in range(X.size(1)):
+
 #                 y = model(X[:,i,:].to(device))
-#                 y_step.append(y)
-            
-#             y_step = torch.mean(torch.stack(y_step, dim=1), dim=1)
-#             Y_hat.append(y_step)
-            
-#         (y_hat,_) = torch.max(torch.sigmoid(torch.stack(Y_hat, dim=1)), dim=1)
-# #         y_hat = torch.sigmoid(y_hat)
-        
-#         for index, image_id in enumerate(F): 
-            
-#             l = y_hat[index,:].tolist()
-#             l = list(map(lambda x: round(x,4), l))
-#             sub_df.loc[image_id]= l
+#                 Y_hat.append(y)
 
-# sub_df
+#             (y_hat,_) = torch.max(torch.stack(Y_hat, dim=1), dim=1)
+
+#             for index, image_id in enumerate(F): 
+
+#                 l = y_hat[index,:].tolist()
+                
+#                 if not image_id in id_dict:
+#                     id_dict[image_id] = []
+                    
+#                 id_dict[image_id].append(l)
+
+# processes = []
+                
+# for fold_id in range(5):
+#     print('predicting for fold ', fold_id)
+#     predict(fold_id, id_dict)
+    
+# for k, v in id_dict.items():
+#     l = np.array(v).max(0)
+#     l = list(map(lambda x: round(x,4), l))
+#     l = l.tolist()
+    
+#     sub_df.loc[k]= l
+
 # sub_df.to_csv('submission.csv')
+    
+models = nn.ModuleList()
+
+for fold_id in range(5):
+    
+    ckpt = glob.glob(f'checkpoints_903/fold_{fold_id}/epoch*.ckpt')[0]
+    
+    model = Model.load_from_checkpoint(checkpoint_path=ckpt)
+    model = model.eval()
+    model.to(device)
+    
+    models.append(model)
+    
+
+for X,F in tqdm(test_loader):
+    
+    with torch.no_grad():
+        
+        X = X.unfold(1, CONFIG.sr * CONFIG.period, CONFIG.sr * CONFIG.skip)
+        
+        Y_hat = []
+        
+        for i in range(X.size(1)):
+            
+            y_step = []
+
+            for model in models:
+                y = model(X[:,i,:].to(device))
+                y_step.append(y)
+            
+            y_step = torch.mean(torch.stack(y_step, dim=1), dim=1)
+            Y_hat.append(y_step)
+            
+        (y_hat,_) = torch.max(torch.stack(Y_hat, dim=1), dim=1)
+        
+        for index, image_id in enumerate(F): 
+            
+            l = y_hat[index,:].tolist()
+            l = list(map(lambda x: round(x,4), l))
+            sub_df.loc[image_id]= l
+
+sub_df.to_csv('submission.csv')
 
 
