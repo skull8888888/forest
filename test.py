@@ -14,8 +14,6 @@ from torch.utils.data import DataLoader
 from config import CONFIG
 import glob
 
-
-
 class TestDataset(data.Dataset):
 
     def __init__(self, data_dir):
@@ -114,8 +112,15 @@ device = 'cuda:0'
 models = nn.ModuleList()
 
 for fold_id in range(5):
+
+#     ckpts = glob.glob(f'checkpoints/fold_{fold_id}/epoch*.ckpt')
+
+#     accs = list(map(lambda c: int(c[-9:-5]), ckpts))
+#     max_i = np.argmax(accs)
+
+#     ckpt = ckpts[max_i]
     
-    ckpt = glob.glob(f'checkpoints_903/fold_{fold_id}/epoch*.ckpt')[0]
+    ckpt = glob.glob(f'checkpoints/fold_{fold_id}/epoch*.ckpt')[0]
     
     model = Model.load_from_checkpoint(checkpoint_path=ckpt)
     model = model.eval()
